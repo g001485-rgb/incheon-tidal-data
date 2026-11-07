@@ -90,6 +90,7 @@ Future<List<PrefetchPoint>> _fetchTile(
   _Budget b,
 ) async {
   Object? last;
+  var rejected = false;
   for (var attempt = 0; attempt < 3; attempt++) {
     if (b.exhausted) throw StateError('호출 한도에 닿았다');
     try {
@@ -101,10 +102,21 @@ Future<List<PrefetchPoint>> _fetchTile(
       var msg = '${e.runtimeType}: $e'.replaceAll(_key, '***');
       if (msg.length > 160) msg = msg.substring(0, 160);
       last = msg;
+      // 서버가 오류 문구나 이상한 본문을 돌려준 경우(FormatException)는 되풀이해도 같으니 한 번만 더 본다
+      rejected = e is FormatException;
+      if (rejected && attempt >= 1) break;
       await Future<void>.delayed(Duration(seconds: 2 * (attempt + 1)));
     }
   }
-  throw StateError('타일 ${t.shortId} 받기 실패(${last ?? '?'})');
+  final text = '타일 ${t.shortId} 받기 실패(${last ?? '?'})';
+  if (rejected) throw _TileRejected(text);
+  throw StateError(text);
+}
+
+/// 서버가 이 타일 요청을 받아들이지 않았다(모델 범위 밖 등) — 다른 타일이 멀쩡하면 이 타일만 비운다.
+class _TileRejected implements Exception {
+  final String message;
+  const _TileRejected(this.message);
 }
 
 /// [jobs]를 [concurrency]개씩 동시에 돌린다. 하나라도 실패하면 나머지는 시작하지 않고 그 예외를 던진다.
@@ -209,12 +221,35 @@ Future<void> main(List<String> args) async {
     final newEmpty = <String>{};
     try {
       final todo = fine.where((f) => !empties.contains(f.shortId)).toList();
+      final rejected = <String>[];
       await _pool<PrefetchTile>(todo, concurrency, (f) async {
-        final pts = await _fetchTile(f, t, budget);
-        byTile[f.shortId] = pts;
-        all.addAll(pts);
-        if (pts.isEmpty) newEmpty.add(f.shortId);
+        try {
+          final pts = await _fetchTile(f, t, budget);
+          byTile[f.shortId] = pts;
+          all.addAll(pts);
+          if (pts.isEmpty) newEmpty.add(f.shortId);
+        } on _TileRejected catch (r) {
+          // 서버가 받아주지 않는 타일(모델 범위 가장자리 등) — 빈 타일로 두고 다음부터 건너뛴다
+          byTile[f.shortId] = const [];
+          newEmpty.add(f.shortId);
+          rejected.add(r.message);
+          // 처음부터 많이 거절되면 인증키·한도 문제 — 호출을 더 낭비하지 않고 바로 멈춘다
+          if (rejected.length > 30) {
+            throw StateError('거절된 타일이 너무 많다: ${rejected.first}');
+          }
+        }
       });
+      if (rejected.isNotEmpty) {
+        stdout.writeln(
+          '서버가 받아주지 않은 타일 ${rejected.length}개 — 예: ${rejected.first}',
+        );
+      }
+      // 거의 다 거절이면 인증키·한도 문제이지 가장자리가 아니다 — 장면 전체를 실패로 본다
+      if (rejected.length > todo.length * 0.1) {
+        throw StateError(
+          '거절된 타일이 너무 많다(${rejected.length}/${todo.length}): ${rejected.first}',
+        );
+      }
     } catch (e) {
       stderr.writeln(
         '장면 $key 실패: ${e is StateError ? e.message : e.runtimeType}',
