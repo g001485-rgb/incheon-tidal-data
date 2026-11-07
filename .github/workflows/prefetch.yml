@@ -1,0 +1,60 @@
+# 조류 미리 받기 — 자료 저장소(공개)의 .github/workflows/prefetch.yml 로 복사해 쓴다.
+# 6시간마다(와 손으로 실행할 때) 인천 바다 조류 예측을 받아 정적 파일로 만들고 GitHub Pages에 올린다.
+# 필요한 설정: 저장소 Settings → Secrets and variables → Actions 에 KHOA_KEY(해양조사원 인증키),
+#              Settings → Pages → Source 를 "GitHub Actions"로. 자세한 순서는 docs/기획/조류_미리받기_설정.md.
+name: tidal-current-prefetch
+
+on:
+  schedule:
+    # 하루 4번(한국시간 03:10·09:10·15:10·21:10)
+    - cron: '10 18,0,6,12 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 같은 때 두 번 돌지 않게
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+
+      # 이미 만든 장면(예측값은 같은 시각이면 변하지 않는다)을 보관해 새 장면만 받는다 — 하루 호출 한도를 아낀다.
+      # 열쇠는 실행마다 새로 만들고, 가장 최근 보관본을 이어 받는다.
+      - uses: actions/cache@v4
+        with:
+          path: site
+          key: tc-${{ github.run_id }}
+          restore-keys: tc-
+
+      - name: Prefetch
+        env:
+          KHOA_KEY: ${{ secrets.KHOA_KEY }}
+        run: dart tool/tidal_current_prefetch/prefetch.dart --out site
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
