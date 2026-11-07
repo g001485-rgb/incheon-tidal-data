@@ -97,6 +97,11 @@ List<PrefetchPoint> parseApiBody(Map<String, dynamic> json) {
   final result = json['result'];
   if (result is! Map) throw const FormatException('응답 형식 오류');
   final error = result['error'];
+  // 육지·모델 범위 밖 타일은 오류 문구 'No search data'로 온다 — 오류가 아니라 점 없음(앱과 같은 처리)
+  if (error != null &&
+      error.toString().toLowerCase().contains('no search data')) {
+    return const [];
+  }
   if (error != null) throw FormatException('서버 오류: $error');
   final data = result['data'];
   if (data == null) return const [];
