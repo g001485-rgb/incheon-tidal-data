@@ -97,7 +97,10 @@ Future<List<PrefetchPoint>> _fetchTile(
     } on StateError {
       rethrow;
     } catch (e) {
-      last = e.runtimeType;
+      // 원인을 알 수 있게 종류와 짧은 설명을 남기되 인증키는 가린다(주소는 오류 문구에 넣지 않는다)
+      var msg = '${e.runtimeType}: $e'.replaceAll(_key, '***');
+      if (msg.length > 160) msg = msg.substring(0, 160);
+      last = msg;
       await Future<void>.delayed(Duration(seconds: 2 * (attempt + 1)));
     }
   }
