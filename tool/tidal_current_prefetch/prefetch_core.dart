@@ -83,8 +83,11 @@ DateTime floorToStep(DateTime t) => DateTime(
 );
 
 /// 만들어 둘 장면 시각들 — [now]를 30분으로 내린 시각의 30분 앞부터 +[hoursAhead]시간까지.
-/// 앱은 지금(가장 가까운 30분)에서 +24시간까지 보므로 여유를 둔다.
-List<DateTime> framesToBuild(DateTime now, {int hoursAhead = 27}) {
+/// 앱은 지금(가장 가까운 30분)에서 +24시간까지 보므로 여유를 둔다 — 48시간이면 갱신이 21시간 넘게 끊겨도 +24시간이
+/// 남는다(2026-11-18). GitHub 예약 실행은 늦거나 빠져서 실제 간격이 평균 11시간·최대 15.7시간이었고(11-13~17 실행 이력),
+/// 예전 27·33시간으로는 하루의 대부분 동안 뒤쪽 장면이 비어 앱이 해양조사원 서버를 직접 불렀다.
+/// 이미 만든 장면은 다시 받지 않으므로 범위를 늘려도 평소 하루 호출 수는 같다(처음 한 번만 더 받는다).
+List<DateTime> framesToBuild(DateTime now, {int hoursAhead = 48}) {
   final start = floorToStep(now).subtract(const Duration(minutes: stepMinutes));
   final n = (hoursAhead * 60 + stepMinutes) ~/ stepMinutes + 1;
   return [
@@ -192,6 +195,60 @@ String buildIndexJson({
       '"sizes":[${publishedSizes.join(',')}],'
       '"stepMin":$stepMinutes,'
       '"frames":[${sorted.map((f) => '"$f"').join(',')}]}';
+}
+
+/// 색인의 마지막 장면이 [now](30분으로 내림) + [minAheadHours]시간에 못 미치면 그 기준 장면 열쇠, 넉넉하면 null.
+/// [ready]가 비었으면 기준 열쇠를 돌려준다. 장면 열쇠(yyyyMMddHHmm)는 글자 순서가 시각 순서와 같다.
+/// 인증키 만료·하루 한도로 일부만 받았을 때 실행을 빨간불(종료 코드 1)로 알리는 데 쓴다(검토 TA-2).
+String? aheadShortfall(
+  List<String> ready,
+  DateTime now, {
+  required int minAheadHours,
+}) {
+  final need = frameKey(floorToStep(now).add(Duration(hours: minAheadHours)));
+  if (ready.isEmpty) return need;
+  final last = ([...ready]..sort()).last;
+  return last.compareTo(need) < 0 ? need : null;
+}
+
+/// 오류 문구를 공개 로그(Actions)에 남겨도 되게 다듬는다 — 인증키가 어떤 모양으로도 남지 않게.
+///
+/// dart:io의 `HttpException`은 문구 끝에 `, uri = https://…?ServiceKey=<인코딩된 키>…`를 붙이고, 주소 안의 키는
+/// 원문이 아니라 `Uri.encodeQueryComponent` 모양(`+`→`%2B` 등)이라 원문 키만 가리면 새 나간다. 그래서
+///  1) `uri =` 이하를 통째로 버리고, 2) 키(원문·인코딩 여러 모양, 대소문자 무시)를 가리고,
+///  3) 남은 주소·쿼리(`?a=b`, `&a=b`)와 `serviceKey=…`를 지운 **뒤에** [maxLength]로 자른다(자르기는 맨 마지막).
+String redactErrorText(String text, String key, {int maxLength = 160}) {
+  var s = text;
+  // 1) dart:io가 붙이는 ', uri = …'와 그 뒤 전부
+  final u = RegExp(r',?\s*uri\s*=', caseSensitive: false).firstMatch(s);
+  if (u != null) s = s.substring(0, u.start);
+  // 2) 키 — 원문과 주소에 들어가는 인코딩 모양들(긴 것부터, 퍼센트 대소문자까지 대소문자 무시)
+  final k = key.trim();
+  if (k.isNotEmpty) {
+    final forms = <String>{
+      k,
+      Uri.encodeQueryComponent(k),
+      Uri.encodeComponent(k),
+      Uri.encodeFull(k),
+    }.toList()..sort((a, b) => b.length.compareTo(a.length));
+    for (final f in forms) {
+      s = s.replaceAll(RegExp(RegExp.escape(f), caseSensitive: false), '***');
+    }
+  }
+  // 3) 주소·쿼리·서비스키 꼴
+  s = s
+      .replaceAll(
+        RegExp(r'[a-z][a-z0-9+.-]*://\S*', caseSensitive: false),
+        '<주소>',
+      )
+      .replaceAll(
+        RegExp(r'service_?key\s*[=:]\s*\S*', caseSensitive: false),
+        'ServiceKey=***',
+      )
+      .replaceAll(RegExp(r'[?&][A-Za-z_][A-Za-z0-9_]*=\S*'), '');
+  s = s.trim();
+  if (s.length > maxLength) s = s.substring(0, maxLength);
+  return s;
 }
 
 /// 시험·점검용 — 만들 타일 수(크기별).

@@ -1,13 +1,17 @@
 # 조류 미리 받기 — 자료 저장소(공개)의 .github/workflows/prefetch.yml 로 복사해 쓴다.
-# 6시간마다(와 손으로 실행할 때) 인천 바다 조류 예측을 받아 정적 파일로 만들고 GitHub Pages에 올린다.
+# 2시간마다(와 손으로 실행할 때) 인천 바다 조류 예측을 받아 정적 파일로 만들고 GitHub Pages에 올린다.
 # 필요한 설정: 저장소 Settings → Secrets and variables → Actions 에 KHOA_KEY(해양조사원 인증키),
 #              Settings → Pages → Source 를 "GitHub Actions"로. 자세한 순서는 docs/기획/조류_미리받기_설정.md.
+# 주의: 공개 저장소는 60일 동안 저장소 활동(커밋 등)이 없으면 GitHub가 이 예약 실행을 저절로 끈다.
+#       이 작업은 커밋을 만들지 않으므로 두 달에 한 번 점검·복구가 필요하다(설정 문서의 '60일 비활동 중지').
 name: tidal-current-prefetch
 
 on:
   schedule:
-    # 하루 4번(한국시간 03:10·09:10·15:10·21:10)
-    - cron: '10 18,0,6,12 * * *'
+    # 2시간마다(매 짝수 시 37분 UTC). 예전엔 하루 4번이었는데 GitHub가 붐빌 때 예약 실행을 늦추거나 빼서
+    # 실제로는 하루 평균 2.5번(간격 최대 15.7시간)만 돌았다(2026-11-18 확인) — 횟수를 늘려 빠져도 자주 갱신되게 하고,
+    # 정각 근처(가장 붐빈다)를 피한다. 이미 만든 장면은 다시 받지 않으므로 자주 돌아도 하루 호출 수는 같다.
+    - cron: '37 */2 * * *'
   workflow_dispatch:
 
 permissions:
@@ -24,6 +28,8 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 150
+    outputs:
+      prefetch_code: ${{ steps.prefetch.outputs.code }}
     steps:
       - uses: actions/checkout@v4
 
@@ -39,10 +45,20 @@ jobs:
           key: tc-${{ github.run_id }}
           restore-keys: tc-
 
+      # 종료 코드: 0 정상 · 1 일부만 받음(지금+24시간 미달이거나 어떤 장면이 모든 타일 빈 답이라 버려짐 — 받은 만큼은 올리고 맨 끝에 빨간불)
+      #            · 그 밖(2 등: 쓸 장면이 하나도 없음)은 올리지 않음. 기준 24시간은 prefetch.dart의 --min-ahead 기본값(--hours가 24보다 작으면 그 값).
+      # --hours 48: 예약 실행이 21시간 넘게 끊겨도 앱 슬라이더(+24시간)가 비지 않게(평소 하루 호출 수는 그대로,
+      #             늘린 뒤 처음 한 번만 약 6,300회 더 받는다 — --max-calls 9000 안).
       - name: Prefetch
+        id: prefetch
         env:
           KHOA_KEY: ${{ secrets.KHOA_KEY }}
-        run: dart tool/tidal_current_prefetch/prefetch.dart --out site
+        run: |
+          set +e
+          dart tool/tidal_current_prefetch/prefetch.dart --out site --hours 48
+          code=$?
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          if [ "$code" -ne 0 ] && [ "$code" -ne 1 ]; then exit "$code"; fi
 
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
@@ -58,3 +74,10 @@ jobs:
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4
+
+      # 일부만 받았으면 올린 뒤에 빨간불 — 인증키 만료·하루 호출 한도·해외 접속 차단을 놓치지 않게
+      - name: Partial prefetch
+        if: needs.build.outputs.prefetch_code == '1'
+        run: |
+          echo "::error::조류 미리 받기가 지금+24시간을 채우지 못했거나 빈 답으로 버린 장면이 있습니다(인증키 만료·하루 호출 한도·서버 차단·서버 점검 확인). 받은 장면까지만 올렸습니다."
+          exit 1
